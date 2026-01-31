@@ -1,5 +1,7 @@
 # Snell Panel for Surge
 
+[中文](README_zh-CN.md)
+
 ## Overview
 
 Snell Panel is a comprehensive management system for Snell proxy nodes that provides unified node management and automatic subscription link generation. The system consists of a backend API server and multiple frontend interfaces (Web UI and iOS App) for seamless node administration.
