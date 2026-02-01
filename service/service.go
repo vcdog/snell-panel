@@ -69,6 +69,7 @@ func Router(cfg *config.Config) *gin.Engine {
 
 	// Routes
 	r.GET("/", h.Welcome)
+	r.POST("/api/login", h.Login)
 	r.POST("/entry", h.AuthMiddleware(), h.InsertEntry)
 	r.GET("/entries", h.AuthMiddleware(), h.QueryAllEntries)
 	r.DELETE("/entry/:ip", h.AuthMiddleware(), h.DeleteEntryByIP)

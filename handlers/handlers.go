@@ -23,6 +23,10 @@ import (
 
 	"snell-panel/models"
 	"snell-panel/utils"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Handlers contains the HTTP request handlers
@@ -48,20 +52,119 @@ func CorsMiddleware() gin.HandlerFunc {
 	return cors.New(config)
 }
 
-// AuthMiddleware returns a middleware that checks for API token
+// AuthMiddleware returns a middleware that checks for API token or JWT
 func (h *Handlers) AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// 1. Check Query Token (Legacy / Static configuration)
 		providedToken := c.Query("token")
-		if providedToken != h.Token {
-			c.JSON(http.StatusUnauthorized, models.ApiResponse{
-				Status:  "error",
-				Message: "Unauthorized",
-			})
-			c.Abort()
+		if providedToken != "" && providedToken == h.Token {
+			c.Next()
 			return
 		}
-		c.Next()
+
+		// 2. Check Bearer Token (JWT)
+		authHeader := c.GetHeader("Authorization")
+		if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
+			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+
+			// Use h.Token as secret key if available, otherwise default
+			secretKey := []byte(h.Token)
+			if len(secretKey) == 0 {
+				secretKey = []byte("snell-panel-secret-key")
+			}
+
+			token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+				if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+					return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+				}
+				return secretKey, nil
+			})
+
+			if err == nil && token.Valid {
+				// Store claims like UserID if needed
+				if claims, ok := token.Claims.(jwt.MapClaims); ok {
+					c.Set("userID", claims["id"])
+					c.Set("username", claims["username"])
+				}
+				c.Next()
+				return
+			}
+		}
+
+		c.JSON(http.StatusUnauthorized, models.ApiResponse{
+			Status:  "error",
+			Message: "Unauthorized",
+		})
+		c.Abort()
+		return
 	}
+}
+
+// Login handles user authentication
+func (h *Handlers) Login(c *gin.Context) {
+	var loginReq models.LoginRequest
+	if err := c.BindJSON(&loginReq); err != nil {
+		c.JSON(http.StatusBadRequest, models.ApiResponse{
+			Status:  "error",
+			Message: "Invalid request format",
+		})
+		return
+	}
+
+	var user models.User
+	err := h.DB.QueryRow("SELECT id, username, password_hash FROM users WHERE username = $1", loginReq.Username).Scan(&user.ID, &user.Username, &user.PasswordHash)
+	if err != nil {
+		// User not found
+		c.JSON(http.StatusUnauthorized, models.ApiResponse{
+			Status:  "error",
+			Message: "Invalid username or password",
+		})
+		return
+	}
+
+	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(loginReq.Password))
+	if err != nil {
+		// Password mismatch
+		c.JSON(http.StatusUnauthorized, models.ApiResponse{
+			Status:  "error",
+			Message: "Invalid username or password",
+		})
+		return
+	}
+
+	// Generate JWT
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"id":       user.ID,
+		"username": user.Username,
+		"exp":      time.Now().Add(time.Hour * 24 * 7).Unix(), // 7 days
+	})
+
+	// Use h.Token as secret key
+	secretKey := []byte(h.Token)
+	if len(secretKey) == 0 {
+		secretKey = []byte("snell-panel-secret-key")
+	}
+
+	tokenString, err := token.SignedString(secretKey)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ApiResponse{
+			Status:  "error",
+			Message: "Failed to generate token",
+		})
+		return
+	}
+
+	// Don't return password hash
+	user.PasswordHash = ""
+
+	c.JSON(http.StatusOK, models.ApiResponse{
+		Status:  "success",
+		Message: "Login successful",
+		Data: models.LoginResponse{
+			Token: tokenString,
+			User:  user,
+		},
+	})
 }
 
 // Welcome handles the root route
@@ -250,16 +353,16 @@ func (h *Handlers) GetSubscription(c *gin.Context) {
 	via := c.Query("via")
 	filter := c.Query("filter")
 	flagParam := c.Query("flag")
-	
+
 	// Default flag to true, set to false only if explicitly set to "false"
 	showFlag := true
 	if flagParam == "false" {
 		showFlag = false
 	}
-	
+
 	var query string
 	var args []interface{}
-	
+
 	if filter != "" {
 		// Filter nodes by node name containing the keyword
 		query = `
@@ -276,7 +379,7 @@ func (h *Handlers) GetSubscription(c *gin.Context) {
 			ORDER BY id
 		`
 	}
-	
+
 	rows, err := h.DB.Query(query, args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, models.ApiResponse{
@@ -319,7 +422,7 @@ func (h *Handlers) GetSubscription(c *gin.Context) {
 				nodeName = entry.NodeName
 			}
 		}
-		
+
 		// Add - xxx suffix to node name when via parameter is provided
 		if via != "" {
 			nodeName = fmt.Sprintf("%s - %s", nodeName, via)

@@ -50,3 +50,22 @@ type ApiResponse struct {
 	Message string      `json:"message"`
 	Data    interface{} `json:"data,omitempty"`
 }
+
+// User represents a system user
+type User struct {
+	ID           int    `json:"id"`
+	Username     string `json:"username"`
+	PasswordHash string `json:"-"`
+}
+
+// LoginRequest represents a login request
+type LoginRequest struct {
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+
+// LoginResponse represents a login response
+type LoginResponse struct {
+	Token string `json:"token"`
+	User  User   `json:"user"`
+}

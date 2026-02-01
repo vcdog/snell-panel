@@ -18,6 +18,7 @@ import (
 	"log"
 
 	_ "github.com/lib/pq"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // InitDB initializes the database connection
@@ -34,7 +35,9 @@ func InitDB(dbURL string) *sql.DB {
 	}
 
 	// Create tables if they don't exist
+	// Create tables if they don't exist
 	createTables(db)
+	createUsersTable(db)
 
 	return db
 }
@@ -88,7 +91,59 @@ func createTables(db *sql.DB) {
 	}
 
 	// Fix sequence issues that might cause primary key conflicts
+	// Fix sequence issues that might cause primary key conflicts
 	fixSequenceIssues(db)
+}
+
+// createUsersTable creates the users table and default admin user
+func createUsersTable(db *sql.DB) {
+	// Check if the table already exists
+	var tableExists bool
+	err := db.QueryRow(`
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables 
+			WHERE table_name = 'users'
+		)
+	`).Scan(&tableExists)
+
+	if err != nil {
+		log.Fatalf("Failed to check if users table exists: %v", err)
+	}
+
+	if !tableExists {
+		_, err = db.Exec(`
+			CREATE TABLE users (
+				id SERIAL PRIMARY KEY,
+				username TEXT UNIQUE NOT NULL,
+				password_hash TEXT NOT NULL
+			)
+		`)
+		if err != nil {
+			log.Fatalf("Failed to create users table: %v", err)
+		}
+		log.Printf("Created users table")
+	}
+
+	// Check if any user exists
+	var count int
+	err = db.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
+	if err != nil {
+		log.Fatalf("Failed to count users: %v", err)
+	}
+
+	if count == 0 {
+		// Create default admin user
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
+		if err != nil {
+			log.Fatalf("Failed to generate password hash: %v", err)
+		}
+
+		_, err = db.Exec("INSERT INTO users (username, password_hash) VALUES ($1, $2)", "admin", string(hashedPassword))
+		if err != nil {
+			log.Fatalf("Failed to create default user: %v", err)
+		}
+		log.Printf("Created default admin user (username: admin, password: admin)")
+	}
 }
 
 // removeIPUniqueConstraint removes the UNIQUE constraint from the ip column
