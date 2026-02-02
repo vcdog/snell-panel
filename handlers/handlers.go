@@ -494,14 +494,15 @@ func (h *Handlers) GetAdvancedSubscription(c *gin.Context) {
 		emojiFlag := utils.CountryCodeToFlagEmoji(entry.CountryCode)
 		nodeName := entry.NodeName
 		if nodeName == "" {
-			nodeName = fmt.Sprintf("%s %s AS%d %s %s",
-				emojiFlag, entry.CountryCode, entry.ASN, entry.ISP, entry.NodeID)
+			nodeName = fmt.Sprintf("%s 【%s】SNELL-%s-节点",
+				emojiFlag, entry.CountryCode, entry.NodeID[:8])
 		} else {
-			nodeName = fmt.Sprintf("%s %s", emojiFlag, entry.NodeName)
+			nodeName = fmt.Sprintf("%s 【%s】%s", emojiFlag, entry.CountryCode, entry.NodeName)
 		}
 		
 		// Clean node name
 		nodeName = strings.TrimSpace(nodeName)
+		
 		nodeNames = append(nodeNames, nodeName)
 
 		line := fmt.Sprintf("%s = snell, %s, %d, psk = %s, version = %s",
@@ -514,74 +515,35 @@ func (h *Handlers) GetAdvancedSubscription(c *gin.Context) {
 		return
 	}
 
-	// Build the configuration
-	var sb strings.Builder
-
-	sb.WriteString("[General]\n")
-	sb.WriteString("loglevel = notify\n")
-	sb.WriteString("dns-server = system, 223.5.5.5, 8.8.8.8\n\n")
-
-	sb.WriteString("[Proxy]\n")
-	for _, node := range nodes {
-		sb.WriteString(node + "\n")
-	}
-	sb.WriteString("\n")
-
-	sb.WriteString("[Proxy Group]\n")
-	// Proxy Selection Group
-	sb.WriteString("Proxy = select, Auto, " + strings.Join(nodeNames, ", ") + "\n")
-	// Auto Test Group
-	sb.WriteString("Auto = url-test, " + strings.Join(nodeNames, ", ") + ", url=http://www.gstatic.com/generate_204, interval=600\n")
-	sb.WriteString("\n")
-
-	sb.WriteString("[Rule]\n")
-	
-	// Add rules based on ruleSet
-	switch ruleSet {
-	case "minimal":
-		sb.WriteString("GEOIP,CN,DIRECT\n")
-		sb.WriteString("FINAL,Proxy\n")
-	case "balanced":
-		sb.WriteString("# Balanced Rules\n")
-		sb.WriteString("DOMAIN-SUFFIX,google.com,Proxy\n")
-		sb.WriteString("DOMAIN-SUFFIX,youtube.com,Proxy\n")
-		sb.WriteString("DOMAIN-SUFFIX,github.com,Proxy\n")
-		sb.WriteString("DOMAIN-SUFFIX,telegram.org,Proxy\n")
-		sb.WriteString("DOMAIN-KEYWORD,google,Proxy\n")
-		sb.WriteString("GEOIP,CN,DIRECT\n")
-		sb.WriteString("FINAL,Proxy\n")
-	case "comprehensive":
-		sb.WriteString("# Comprehensive Rules\n")
-		sb.WriteString("DOMAIN-SUFFIX,google.com,Proxy\n")
-		sb.WriteString("DOMAIN-SUFFIX,youtube.com,Proxy\n")
-		sb.WriteString("DOMAIN-SUFFIX,facebook.com,Proxy\n")
-		sb.WriteString("DOMAIN-SUFFIX,twitter.com,Proxy\n")
-		sb.WriteString("DOMAIN-SUFFIX,instagram.com,Proxy\n")
-		sb.WriteString("DOMAIN-SUFFIX,github.com,Proxy\n")
-		sb.WriteString("DOMAIN-SUFFIX,telegram.org,Proxy\n")
-		sb.WriteString("DOMAIN-SUFFIX,netflix.com,Proxy\n")
-		sb.WriteString("DOMAIN-KEYWORD,google,Proxy\n")
-		sb.WriteString("GEOIP,CN,DIRECT\n")
-		sb.WriteString("FINAL,Proxy\n")
-	case "custom":
-		if customRulesStr != "" {
-			rules := strings.Split(customRulesStr, ",")
-			for _, r := range rules {
-				// Simple validation or just append
-				// Expecting format like "DOMAIN-SUFFIX:example.com:Proxy" from frontend or just standard string?
-				// Frontend sends raw strings if json, but comma joined?
-				// Implementation assumes frontend sends valid rule strings or we format them
-				sb.WriteString(strings.TrimSpace(r) + "\n")
+	// Parse custom rules to determine template
+	var requestedRules []string
+	if customRulesStr != "" {
+		requestedRules = strings.Split(customRulesStr, ",")
+		// Clean up rules
+		cleanRules := []string{}
+		for _, rule := range requestedRules {
+			if trimmed := strings.TrimSpace(rule); trimmed != "" {
+				cleanRules = append(cleanRules, trimmed)
 			}
 		}
-		sb.WriteString("FINAL,Proxy\n")
-	default:
-		// Default to direct if unknown, or balanced
-		sb.WriteString("GEOIP,CN,DIRECT\n")
-		sb.WriteString("FINAL,Proxy\n")
+		requestedRules = cleanRules
 	}
 
-	c.String(http.StatusOK, sb.String())
+	// Determine which template to use
+	templateName := utils.GetTemplateNameByRuleSet(ruleSet, requestedRules)
+	
+	// Load the template
+	template, err := utils.LoadConfigTemplate(templateName)
+	if err != nil {
+		// Fallback: if template loading fails, return error message
+		c.String(http.StatusInternalServerError, fmt.Sprintf("# Failed to load configuration template: %v\n# Please contact administrator", err))
+		return
+	}
+
+	// Generate configuration from template
+	config := utils.GenerateConfigFromTemplate(template, nodes, nodeNames)
+
+	c.String(http.StatusOK, config)
 }
 
 // ModifyNodeByNodeID handles modifying a node by its NodeID
