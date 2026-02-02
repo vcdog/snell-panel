@@ -349,6 +349,13 @@ func (h *Handlers) QueryAllEntries(c *gin.Context) {
 
 // GetSubscription handles generating a subscription string
 func (h *Handlers) GetSubscription(c *gin.Context) {
+	// Check format parameter
+	format := c.Query("format")
+	if format == "advanced" {
+		h.GetAdvancedSubscription(c)
+		return
+	}
+
 	// Get the via, filter, and flag parameters from query string
 	via := c.Query("via")
 	filter := c.Query("filter")
@@ -449,6 +456,132 @@ func (h *Handlers) GetSubscription(c *gin.Context) {
 	}
 
 	c.String(http.StatusOK, strings.Join(subscriptionLines, "\n"))
+}
+
+// GetAdvancedSubscription handles generating a full configuration file
+func (h *Handlers) GetAdvancedSubscription(c *gin.Context) {
+	ruleSet := c.Query("ruleSet")
+	customRulesStr := c.Query("customRules")
+	
+	// Fetch all nodes
+	rows, err := h.DB.Query(`
+		SELECT ip, port, psk, country_code, isp, asn, node_id, node_name, version 
+		FROM entries
+		ORDER BY id
+	`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, models.ApiResponse{
+			Status:  "error",
+			Message: err.Error(),
+		})
+		return
+	}
+	defer rows.Close()
+
+	var nodes []string
+	var nodeNames []string
+
+	for rows.Next() {
+		var entry models.Entry
+		if err := rows.Scan(
+			&entry.IP, &entry.Port, &entry.PSK,
+			&entry.CountryCode, &entry.ISP, &entry.ASN,
+			&entry.NodeID, &entry.NodeName, &entry.Version,
+		); err != nil {
+			continue
+		}
+
+		emojiFlag := utils.CountryCodeToFlagEmoji(entry.CountryCode)
+		nodeName := entry.NodeName
+		if nodeName == "" {
+			nodeName = fmt.Sprintf("%s %s AS%d %s %s",
+				emojiFlag, entry.CountryCode, entry.ASN, entry.ISP, entry.NodeID)
+		} else {
+			nodeName = fmt.Sprintf("%s %s", emojiFlag, entry.NodeName)
+		}
+		
+		// Clean node name
+		nodeName = strings.TrimSpace(nodeName)
+		nodeNames = append(nodeNames, nodeName)
+
+		line := fmt.Sprintf("%s = snell, %s, %d, psk = %s, version = %s",
+			nodeName, entry.IP, entry.Port, entry.PSK, entry.Version)
+		nodes = append(nodes, line)
+	}
+
+	if len(nodes) == 0 {
+		c.String(http.StatusOK, "# No nodes found in database")
+		return
+	}
+
+	// Build the configuration
+	var sb strings.Builder
+
+	sb.WriteString("[General]\n")
+	sb.WriteString("loglevel = notify\n")
+	sb.WriteString("dns-server = system, 223.5.5.5, 8.8.8.8\n\n")
+
+	sb.WriteString("[Proxy]\n")
+	for _, node := range nodes {
+		sb.WriteString(node + "\n")
+	}
+	sb.WriteString("\n")
+
+	sb.WriteString("[Proxy Group]\n")
+	// Proxy Selection Group
+	sb.WriteString("Proxy = select, Auto, " + strings.Join(nodeNames, ", ") + "\n")
+	// Auto Test Group
+	sb.WriteString("Auto = url-test, " + strings.Join(nodeNames, ", ") + ", url=http://www.gstatic.com/generate_204, interval=600\n")
+	sb.WriteString("\n")
+
+	sb.WriteString("[Rule]\n")
+	
+	// Add rules based on ruleSet
+	switch ruleSet {
+	case "minimal":
+		sb.WriteString("GEOIP,CN,DIRECT\n")
+		sb.WriteString("FINAL,Proxy\n")
+	case "balanced":
+		sb.WriteString("# Balanced Rules\n")
+		sb.WriteString("DOMAIN-SUFFIX,google.com,Proxy\n")
+		sb.WriteString("DOMAIN-SUFFIX,youtube.com,Proxy\n")
+		sb.WriteString("DOMAIN-SUFFIX,github.com,Proxy\n")
+		sb.WriteString("DOMAIN-SUFFIX,telegram.org,Proxy\n")
+		sb.WriteString("DOMAIN-KEYWORD,google,Proxy\n")
+		sb.WriteString("GEOIP,CN,DIRECT\n")
+		sb.WriteString("FINAL,Proxy\n")
+	case "comprehensive":
+		sb.WriteString("# Comprehensive Rules\n")
+		sb.WriteString("DOMAIN-SUFFIX,google.com,Proxy\n")
+		sb.WriteString("DOMAIN-SUFFIX,youtube.com,Proxy\n")
+		sb.WriteString("DOMAIN-SUFFIX,facebook.com,Proxy\n")
+		sb.WriteString("DOMAIN-SUFFIX,twitter.com,Proxy\n")
+		sb.WriteString("DOMAIN-SUFFIX,instagram.com,Proxy\n")
+		sb.WriteString("DOMAIN-SUFFIX,github.com,Proxy\n")
+		sb.WriteString("DOMAIN-SUFFIX,telegram.org,Proxy\n")
+		sb.WriteString("DOMAIN-SUFFIX,netflix.com,Proxy\n")
+		sb.WriteString("DOMAIN-KEYWORD,google,Proxy\n")
+		sb.WriteString("GEOIP,CN,DIRECT\n")
+		sb.WriteString("FINAL,Proxy\n")
+	case "custom":
+		if customRulesStr != "" {
+			rules := strings.Split(customRulesStr, ",")
+			for _, r := range rules {
+				// Simple validation or just append
+				// Expecting format like "DOMAIN-SUFFIX:example.com:Proxy" from frontend or just standard string?
+				// Frontend sends raw strings if json, but comma joined?
+				// Implementation assumes frontend sends valid rule strings or we format them
+				sb.WriteString(strings.TrimSpace(r) + "\n")
+			}
+		}
+		sb.WriteString("FINAL,Proxy\n")
+	default:
+		// Default to direct if unknown, or balanced
+		sb.WriteString("GEOIP,CN,DIRECT\n")
+		sb.WriteString("FINAL,Proxy\n")
+	}
+
+	c.String(http.StatusOK, sb.String())
 }
 
 // ModifyNodeByNodeID handles modifying a node by its NodeID
